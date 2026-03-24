@@ -46,7 +46,7 @@ object ChangelogParser {
             """-\s+include:\s*\n\s+file:\s*(.+?)\s*\n(?:\s+relativeToChangelogFile:\s*(true|false)\s*\n)?""",
             RegexOption.MULTILINE
         )
-        for (match in includeRegex.findAll(content)) {
+        includeRegex.findAll(content).forEach { match ->
             val path = match.groupValues[1].trim()
             val isRelative = match.groupValues[2].let { it.isEmpty() || it == "true" }
             val resolved = resolveIncludePath(path, changelogDir, isRelative, changelogFile)
@@ -57,7 +57,7 @@ object ChangelogParser {
             """-\s+includeAll:\s*\n\s+path:\s*(.+?)\s*$""",
             RegexOption.MULTILINE
         )
-        for (match in includeAllRegex.findAll(content)) {
+        includeAllRegex.findAll(content).forEach { match ->
             val dirPath = match.groupValues[1].trim()
             val dir = resolveIncludePath(dirPath, changelogDir, isRelative = true, changelogFile)
             if (dir.isDirectory) {

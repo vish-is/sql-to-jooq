@@ -7,14 +7,18 @@ object FlywayMigrationScanner {
     private val versionedRegex = Regex("""^[Vv](\d+(?:[._]\d+)*)__.*\.sql$""")
 
     /**
-     * Scans a directory for Flyway versioned SQL migration files (V*__*.sql)
-     * and returns them sorted by version number.
+     * Recursively scans a directory (including subdirectories) for Flyway
+     * versioned SQL migration files (V*__*.sql) and returns them sorted
+     * by version number.
+     *
+     * Supports structures where migrations are organized in subdirectories
+     * by DB schema (e.g. `migration/edo/`, `migration/orient/`).
      */
     fun scanSqlFiles(migrationsDir: File): List<File> =
-        migrationsDir.listFiles()
-            ?.filter { it.isFile && versionedRegex.matches(it.name) }
-            ?.sortedWith(compareBy { parseVersion(it.name) })
-            ?: emptyList()
+        migrationsDir.walkTopDown()
+            .filter { it.isFile && versionedRegex.matches(it.name) }
+            .sortedWith(compareBy { parseVersion(it.name) })
+            .toList()
 
     private fun parseVersion(fileName: String): List<Int> {
         val match = versionedRegex.find(fileName) ?: return emptyList()

@@ -5,7 +5,7 @@ import sqltojooq.parser.TableDefinition
 object RepositoryGenerator {
 
     /**
-     * Generates JooqRepository<P, ID> interface — the contract.
+     * Generates JooqRepository<R, ID> interface — the contract.
      * Lives in the root jOOQ package (e.g. db.jooq).
      */
     fun generateInterface(packageName: String): String {
@@ -18,20 +18,20 @@ object RepositoryGenerator {
             appendLine("/**")
             appendLine(" * Contract for all jOOQ-backed repositories.")
             appendLine(" *")
-            appendLine(" * @param P  the generated Pojo class")
+            appendLine(" * @param R  the generated Record class")
             appendLine(" * @param ID the primary key type")
             appendLine(" */")
-            appendLine("interface JooqRepository<P : Any, ID : Any> {")
+            appendLine("interface JooqRepository<R : Any, ID : Any> {")
             appendLine()
-            appendLine("    fun findById(id: ID): P?")
+            appendLine("    fun findById(id: ID): R?")
             appendLine()
-            appendLine("    fun findAll(): List<P>")
+            appendLine("    fun findAll(): List<R>")
             appendLine()
-            appendLine("    fun findAllByPage(pageable: Pageable): Page<P>")
+            appendLine("    fun findAllByPage(pageable: Pageable): Page<R>")
             appendLine()
-            appendLine("    fun save(pojo: P): P")
+            appendLine("    fun save(record: R): R")
             appendLine()
-            appendLine("    fun saveAll(pojos: List<P>): List<P>")
+            appendLine("    fun saveAll(records: List<R>): List<R>")
             appendLine()
             appendLine("    fun deleteById(id: ID)")
             appendLine()
@@ -41,7 +41,7 @@ object RepositoryGenerator {
     }
 
     /**
-     * Generates AbstractJooqRepository<P, ID> — implements the interface with
+     * Generates AbstractJooqRepository<R, ID> — implements the interface with
      * generic jOOQ DSL calls. Lives in the root jOOQ package.
      */
     fun generateAbstractBase(packageName: String): String {
@@ -60,47 +60,47 @@ object RepositoryGenerator {
             appendLine(" * Abstract base for all jOOQ-backed repositories.")
             appendLine(" * Provides generic CRUD operations via [DSLContext].")
             appendLine(" *")
-            appendLine(" * Concrete generated subclasses provide [table], [pojoClass], and [pkField].")
+            appendLine(" * Concrete generated subclasses provide [table], [recordClass], and [pkField].")
             appendLine(" * Developers add custom queries in hand-written subclasses.")
             appendLine(" */")
-            appendLine("abstract class AbstractJooqRepository<P : Any, ID : Any>(")
+            appendLine("abstract class AbstractJooqRepository<R : Any, ID : Any>(")
             appendLine("    protected val dsl: DSLContext")
-            appendLine(") : JooqRepository<P, ID> {")
+            appendLine(") : JooqRepository<R, ID> {")
             appendLine()
             appendLine("    protected abstract val table: TableImpl<Record>")
-            appendLine("    protected abstract val pojoClass: Class<P>")
+            appendLine("    protected abstract val recordClass: Class<R>")
             appendLine("    protected abstract val pkField: Field<ID>")
             appendLine()
-            appendLine("    override fun findById(id: ID): P? =")
+            appendLine("    override fun findById(id: ID): R? =")
             appendLine("        dsl.selectFrom(table)")
             appendLine("            .where(pkField.eq(id))")
-            appendLine("            .fetchOneInto(pojoClass)")
+            appendLine("            .fetchOneInto(recordClass)")
             appendLine()
-            appendLine("    override fun findAll(): List<P> =")
-            appendLine("        dsl.selectFrom(table).fetchInto(pojoClass)")
+            appendLine("    override fun findAll(): List<R> =")
+            appendLine("        dsl.selectFrom(table).fetchInto(recordClass)")
             appendLine()
-            appendLine("    override fun findAllByPage(pageable: Pageable): Page<P> {")
+            appendLine("    override fun findAllByPage(pageable: Pageable): Page<R> {")
             appendLine("        val total = dsl.fetchCount(table).toLong()")
             appendLine("        val records = dsl.selectFrom(table)")
             appendLine("            .limit(pageable.pageSize)")
             appendLine("            .offset(pageable.offset)")
-            appendLine("            .fetchInto(pojoClass)")
+            appendLine("            .fetchInto(recordClass)")
             appendLine("        return PageImpl(records, pageable, total)")
             appendLine("    }")
             appendLine()
-            appendLine("    override fun save(pojo: P): P {")
-            appendLine("        val record = dsl.newRecord(table, pojo)")
+            appendLine("    override fun save(record: R): R {")
+            appendLine("        val jooqRecord = dsl.newRecord(table, record)")
             appendLine("        dsl.insertInto(table)")
-            appendLine("            .set(record)")
+            appendLine("            .set(jooqRecord)")
             appendLine("            .onConflict(pkField)")
             appendLine("            .doUpdate()")
             appendLine("            .setAllToExcluded()")
             appendLine("            .execute()")
-            appendLine("        return pojo")
+            appendLine("        return record")
             appendLine("    }")
             appendLine()
-            appendLine("    override fun saveAll(pojos: List<P>): List<P> =")
-            appendLine("        pojos.map { save(it) }")
+            appendLine("    override fun saveAll(records: List<R>): List<R> =")
+            appendLine("        records.map { save(it) }")
             appendLine()
             appendLine("    override fun deleteById(id: ID) {")
             appendLine("        dsl.deleteFrom(table)")
@@ -120,19 +120,21 @@ object RepositoryGenerator {
      * Generates a concrete Generated*Repository class for a single table.
      * This file lives in the `repository/` package and is always overwritten.
      */
-    fun generateConcrete(table: TableDefinition, packageName: String): String {
-        val className = NameUtils.toPascalCase(table.name)
-        val recordClass = "${className}Record"
-        val generatedClass = "Generated${className}Repository"
+    fun generateConcrete(table: TableDefinition, packageName: String, generateValueClassIds: Boolean = false): String {
+        val recordClassName = NameUtils.toPascalCase(table.name) + "Record"
+        val tableClassName = NameUtils.toPascalCase(table.name) + "Table"
+        val generatedClass = "Generated${NameUtils.toPascalCase(table.name)}Repository"
         val instanceName = NameUtils.toUpperSnakeCase(table.name)
 
         val pkColumn = table.columns.firstOrNull { it.isPrimaryKey }
             ?: table.columns.first()
         val pkFieldName = NameUtils.toUpperSnakeCase(pkColumn.name)
-        val pkKotlinType = TypeMapper.map(pkColumn.sqlType).kotlinType.substringAfterLast(".")
 
+        val valueClassName = if (generateValueClassIds) ValueClassGenerator.valueClassName(table) else null
+        val pkKotlinType = valueClassName ?: TypeMapper.map(pkColumn.sqlType).kotlinType.substringAfterLast(".")
+
+        val tablePkg = "$packageName.table"
         val recordPkg = "$packageName.record"
-        val pojoPkg = "$packageName.pojo"
         val repoPkg = "$packageName.repository"
 
         return buildString {
@@ -142,66 +144,53 @@ object RepositoryGenerator {
             appendLine("import org.jooq.Field")
             appendLine("import org.jooq.Record")
             appendLine("import org.jooq.impl.TableImpl")
-            appendLine("import $recordPkg.$recordClass")
-            appendLine("import $pojoPkg.$className")
+            appendLine("import $tablePkg.$tableClassName")
+            appendLine("import $recordPkg.$recordClassName")
             appendLine("import $packageName.AbstractJooqRepository")
 
-            val pkImport = TypeMapper.map(pkColumn.sqlType).kotlinType
-            if (pkImport.contains(".")) {
-                appendLine("import $pkImport")
+            if (valueClassName != null) {
+                appendLine("import $recordPkg.$valueClassName")
+            } else {
+                val pkImport = TypeMapper.map(pkColumn.sqlType).kotlinType
+                if (pkImport.contains(".")) {
+                    appendLine("import $pkImport")
+                }
             }
 
             appendLine()
             appendLine("/**")
             appendLine(" * GENERATED — do not edit. Regenerated by the sql-to-jooq plugin on each run.")
-            appendLine(" * Add custom query methods in [${className}Repository] which extends this class.")
+            appendLine(" * Add custom query methods in [${NameUtils.toPascalCase(table.name)}Repository] which extends this class.")
             appendLine(" */")
-            appendLine("open class $generatedClass(dsl: DSLContext) : AbstractJooqRepository<$className, $pkKotlinType>(dsl) {")
+            appendLine("open class $generatedClass(dsl: DSLContext) : AbstractJooqRepository<$recordClassName, $pkKotlinType>(dsl) {")
             appendLine()
-            appendLine("    override val table: TableImpl<Record> = $recordClass.$instanceName as TableImpl<Record>")
-            appendLine("    override val pojoClass: Class<$className> = $className::class.java")
-            appendLine("    override val pkField: Field<$pkKotlinType> = $recordClass.$instanceName.$pkFieldName as Field<$pkKotlinType>")
+            appendLine("    override val table: TableImpl<Record> = $tableClassName.$instanceName as TableImpl<Record>")
+            appendLine("    override val recordClass: Class<$recordClassName> = $recordClassName::class.java")
+            appendLine("    override val pkField: Field<$pkKotlinType> = $tableClassName.$instanceName.$pkFieldName as Field<$pkKotlinType>")
             appendLine("}")
         }
     }
 
-    /**
-     * Generates PageFilter — abstract base class for all paginated query filters.
-     * Lives in the root jOOQ package.
-     */
     fun generatePageFilter(packageName: String): String {
         return buildString {
             appendLine("package $packageName")
             appendLine()
             appendLine("import org.jooq.SortField")
             appendLine()
-            appendLine("const val DEFAULT_PAGE = 1")
-            appendLine()
-            appendLine("data class PageRange(")
-            appendLine("    val from: Int = 1,")
-            appendLine("    val to: Int = 2")
-            appendLine(")")
-            appendLine()
             appendLine("/**")
             appendLine(" * Abstract base for paginated query filters.")
             appendLine(" *")
             appendLine(" * Concrete filters extend this class and add table-specific filter fields.")
-            appendLine(" * Pagination is page-based: use [page] for a single page or [pageRange] for a range of pages.")
             appendLine(" * [sortFields] overrides the default sort defined in [AbstractPageQuery.defaultSort].")
             appendLine(" */")
             appendLine("abstract class PageFilter(")
             appendLine("    open val limit: Int = 30,")
-            appendLine("    open val page: Int? = null,")
-            appendLine("    open val pageRange: PageRange? = null,")
+            appendLine("    open val offset: Int = 0,")
             appendLine("    open val sortFields: List<SortField<*>>? = null")
             appendLine(")")
         }
     }
 
-    /**
-     * Generates PageResult<T> — the result of a paginated query.
-     * Lives in the root jOOQ package.
-     */
     fun generatePageResult(packageName: String): String {
         return buildString {
             appendLine("package $packageName")
@@ -222,11 +211,6 @@ object RepositoryGenerator {
         }
     }
 
-    /**
-     * Generates AbstractPageQuery<F, T> — abstract class for building paginated
-     * list queries with filtering and sorting, plus a builder for ad-hoc queries.
-     * Lives in the root jOOQ package.
-     */
     fun generateAbstractPageQuery(packageName: String): String {
         return buildString {
             appendLine("package $packageName")
@@ -240,10 +224,10 @@ object RepositoryGenerator {
             appendLine(" * Abstract base for paginated list queries with filtering and sorting.")
             appendLine(" *")
             appendLine(" * Subclasses implement [buildSelect] to define the SELECT + WHERE/GROUP BY,")
-            appendLine(" * [mapRow] for record-to-pojo mapping, and [defaultSort] for the default ORDER BY.")
+            appendLine(" * [mapRow] for record-to-result mapping, and [defaultSort] for the default ORDER BY.")
             appendLine(" *")
             appendLine(" * @param F the concrete [PageFilter] subclass")
-            appendLine(" * @param T the result item type (pojo or projection)")
+            appendLine(" * @param T the result item type")
             appendLine(" */")
             appendLine("abstract class AbstractPageQuery<F : PageFilter, T : Any>(")
             appendLine("    protected open val dsl: DSLContext")
@@ -266,26 +250,12 @@ object RepositoryGenerator {
             appendLine("        }")
             appendLine("    }")
             appendLine()
-            appendLine("    /**")
-            appendLine("     * Builds the base SELECT query with WHERE/GROUP BY conditions derived from [filter].")
-            appendLine("     * Do NOT apply ORDER BY, LIMIT, or OFFSET here — the framework handles that.")
-            appendLine("     */")
             appendLine("    protected abstract fun buildSelect(filter: F): SelectHavingStep<*>")
             appendLine()
-            appendLine("    /**")
-            appendLine("     * Maps a single jOOQ [Record] to the result type [T].")
-            appendLine("     */")
             appendLine("    protected abstract fun mapRow(record: Record): T")
             appendLine()
-            appendLine("    /**")
-            appendLine("     * Default sort order when [PageFilter.sortFields] is null.")
-            appendLine("     */")
             appendLine("    protected abstract fun defaultSort(): List<SortField<*>>")
             appendLine()
-            appendLine("    /**")
-            appendLine("     * Validates the filter before executing the query.")
-            appendLine("     * Override to add custom validation.")
-            appendLine("     */")
             appendLine("    protected open fun validate(filter: F) {}")
             appendLine()
             appendLine("    private fun countTotal(filter: F): Int = dsl")
@@ -303,21 +273,15 @@ object RepositoryGenerator {
             appendLine("            .map(::mapRow)")
             appendLine("    }")
             appendLine()
-            appendLine("    private fun calculateOffset(filter: F): Int =")
-            appendLine("        filter.pageRange?.let { (it.from - 1) * filter.limit } ?: (((filter.page ?: DEFAULT_PAGE) - 1) * filter.limit)")
+            appendLine("    private fun calculateOffset(filter: F): Int = filter.offset")
             appendLine()
-            appendLine("    private fun calculateLimit(filter: F): Int =")
-            appendLine("        filter.pageRange?.let { (it.to - it.from + 1) * filter.limit } ?: filter.limit")
+            appendLine("    private fun calculateLimit(filter: F): Int = filter.limit")
             appendLine()
             appendLine("    companion object {")
             appendLine("        fun <F : PageFilter, T : Any> builder(dsl: DSLContext) = PageQueryBuilder<F, T>(dsl)")
             appendLine("    }")
             appendLine("}")
             appendLine()
-            appendLine("/**")
-            appendLine(" * Builder for creating [AbstractPageQuery] instances without subclassing.")
-            appendLine(" * Useful for simple ad-hoc queries.")
-            appendLine(" */")
             appendLine("class PageQueryBuilder<F : PageFilter, T : Any>(")
             appendLine("    private val dsl: DSLContext")
             appendLine(") {")
@@ -376,27 +340,33 @@ object RepositoryGenerator {
      * Generates a hand-written stub *Repository class. Emitted ONLY IF the file
      * does not already exist. Developers own this file — never overwritten.
      */
-    fun generateHandWrittenStub(table: TableDefinition, packageName: String): String {
-        val className = NameUtils.toPascalCase(table.name)
-        val generatedClass = "Generated${className}Repository"
-        val concreteClass = "${className}Repository"
+    fun generateHandWrittenStub(table: TableDefinition, packageName: String, generateValueClassIds: Boolean = false): String {
+        val recordClassName = NameUtils.toPascalCase(table.name) + "Record"
+        val generatedClass = "Generated${NameUtils.toPascalCase(table.name)}Repository"
+        val concreteClass = "${NameUtils.toPascalCase(table.name)}Repository"
 
         val repoPkg = "$packageName.repository"
-        val pojoPkg = "$packageName.pojo"
+        val recordPkg = "$packageName.record"
 
         val pkColumn = table.columns.firstOrNull { it.isPrimaryKey }
             ?: table.columns.first()
+
+        val valueClassName = if (generateValueClassIds) ValueClassGenerator.valueClassName(table) else null
 
         return buildString {
             appendLine("package $repoPkg")
             appendLine()
             appendLine("import org.jooq.DSLContext")
             appendLine("import org.springframework.stereotype.Repository")
-            appendLine("import $pojoPkg.$className")
+            appendLine("import $recordPkg.$recordClassName")
 
-            val pkImport = TypeMapper.map(pkColumn.sqlType).kotlinType
-            if (pkImport.contains(".")) {
-                appendLine("import $pkImport")
+            if (valueClassName != null) {
+                appendLine("import $recordPkg.$valueClassName")
+            } else {
+                val pkImport = TypeMapper.map(pkColumn.sqlType).kotlinType
+                if (pkImport.contains(".")) {
+                    appendLine("import $pkImport")
+                }
             }
 
             appendLine()

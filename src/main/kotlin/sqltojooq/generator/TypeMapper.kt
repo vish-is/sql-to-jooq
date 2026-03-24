@@ -113,6 +113,10 @@ object TypeMapper {
         }
     }
 
+    /** Returns true for SQL types that represent auto-increment columns (serial, bigserial, smallserial). */
+    fun isAutoIncrement(sqlType: String): Boolean =
+        sqlType.lowercase().trim() in setOf("serial", "bigserial", "smallserial")
+
     private fun extractLength(type: String): Int? =
         Regex("""\((\d+)\)""").find(type)?.groupValues?.get(1)?.toIntOrNull()
 

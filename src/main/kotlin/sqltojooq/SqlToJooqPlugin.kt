@@ -14,7 +14,7 @@ class SqlToJooqPlugin : Plugin<Project> {
 
         val generateTask = project.tasks.register("generateJooq", SqlToJooqTask::class.java) { task ->
             task.group = "generation"
-            task.description = "Generate jOOQ Record, Pojo, Tables and Repository classes from SQL migrations"
+            task.description = "Generate jOOQ Table, Record, Tables and Repository classes from SQL migrations"
             task.migrationTool.set(extension.migrationTool)
             task.changelogFile.set(extension.changelogFile)
             task.migrationsDir.set(extension.migrationsDir)
@@ -24,6 +24,9 @@ class SqlToJooqPlugin : Plugin<Project> {
             task.jsonbMappings.set(extension.jsonbMappings)
             task.enumFields.set(extension.enumFields)
             task.excludeTables.set(extension.excludeTables)
+            task.lateinitFields.set(extension.lateinitFields)
+            task.generateValueClassIds.set(extension.generateValueClassIds)
+            task.immutableRecordFields.set(extension.immutableRecordFields)
         }
 
         project.pluginManager.withPlugin("org.jetbrains.kotlin.jvm") {

@@ -4,9 +4,9 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
-import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
+import org.gradle.api.provider.SetProperty
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.InputFile
@@ -14,10 +14,11 @@ import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
 import sqltojooq.generator.NameUtils
-import sqltojooq.generator.PojoGenerator
 import sqltojooq.generator.RecordGenerator
 import sqltojooq.generator.RepositoryGenerator
+import sqltojooq.generator.TableGenerator
 import sqltojooq.generator.TablesGenerator
+import sqltojooq.generator.ValueClassGenerator
 import sqltojooq.parser.ChangelogParser
 import sqltojooq.parser.FlywayMigrationScanner
 import sqltojooq.parser.SqlParser
@@ -58,7 +59,19 @@ abstract class SqlToJooqTask : DefaultTask() {
 
     @get:Input
     @get:Optional
-    abstract val excludeTables: ListProperty<String>
+    abstract val excludeTables: SetProperty<String>
+
+    @get:Input
+    @get:Optional
+    abstract val lateinitFields: SetProperty<String>
+
+    @get:Input
+    @get:Optional
+    abstract val generateValueClassIds: Property<Boolean>
+
+    @get:Input
+    @get:Optional
+    abstract val immutableRecordFields: Property<Boolean>
 
     @TaskAction
     fun generate() {
@@ -86,18 +99,29 @@ abstract class SqlToJooqTask : DefaultTask() {
         logger.lifecycle("Parsing ${sqlFiles.size} SQL migration files ($tool)...")
         sqlFiles.forEach { logger.lifecycle("  - ${it.name}") }
 
-        val excluded = excludeTables.getOrElse(emptyList()).toSet()
+        val excluded = excludeTables.getOrElse(emptySet())
         val tables = SqlParser().parse(sqlFiles).filter { it.name !in excluded }
         logger.lifecycle("Found ${tables.size} tables: ${tables.joinToString { it.name }}")
 
         val mappings = jsonbMappings.getOrElse(emptyMap())
         val enums = enumFields.getOrElse(emptyMap())
+        val lateinit = lateinitFields.getOrElse(emptySet())
 
         val overlap = mappings.keys.intersect(enums.keys)
         if (overlap.isNotEmpty()) {
             throw GradleException(
                 "Column(s) ${overlap.joinToString()} found in both jsonbMappings and enumFields. Each column must be in only one mapping."
             )
+        }
+
+        if (lateinit.isNotEmpty()) {
+            val allColumns = tables.flatMap { table -> table.columns.map { "${table.name}.${it.name}" } }.toSet()
+            val unknownLateinit = lateinit - allColumns
+            if (unknownLateinit.isNotEmpty()) {
+                throw GradleException(
+                    "lateinitFields entries ${unknownLateinit.joinToString()} do not match any known table.column."
+                )
+            }
         }
 
         val pkg = outputPackage.get()
@@ -110,22 +134,47 @@ abstract class SqlToJooqTask : DefaultTask() {
         // --- Always-regenerated output (build/generated/) ---
         if (genPackageDir.exists()) genPackageDir.deleteRecursively()
 
+        val valueClassIds = generateValueClassIds.getOrElse(false)
+        val fkValueClassMap = if (valueClassIds) ValueClassGenerator.buildFkValueClassMap(tables) else emptyMap()
+        val immutable = immutableRecordFields.getOrElse(true)
+
+        val tableDir = File(genPackageDir, "table").also { it.mkdirs() }
         val recordDir = File(genPackageDir, "record").also { it.mkdirs() }
-        val pojoDir = File(genPackageDir, "pojo").also { it.mkdirs() }
         val repoDir = File(genPackageDir, "repository").also { it.mkdirs() }
         genPackageDir.mkdirs()
 
-        // Records & Pojos
+        // Value class IDs — generated into record/ package
+        if (valueClassIds) {
+            tables.forEach { table ->
+                val vcCode = ValueClassGenerator.generate(table, "$pkg.record") ?: return@forEach
+                val vcName = ValueClassGenerator.valueClassName(table) ?: return@forEach
+                val vcFile = File(recordDir, "$vcName.kt")
+                vcFile.writeText(vcCode)
+                logger.lifecycle("Generated: ${vcFile.relativeTo(genBase)}")
+            }
+        }
+
+        // Table classes (jOOQ TableImpl) & Record classes (data classes)
         tables.forEach { table ->
-            val recordCode = RecordGenerator.generate(table, "$pkg.record", enums)
-            val recordFile = File(recordDir, "${NameUtils.toPascalCase(table.name)}Record.kt")
+            val pascalName = NameUtils.toPascalCase(table.name)
+
+            val tableCode = TableGenerator.generate(table, "$pkg.table", mappings, enums, valueClassIds, fkValueClassMap)
+            val tableFile = File(tableDir, "${pascalName}Table.kt")
+            tableFile.writeText(tableCode)
+            logger.lifecycle("Generated: ${tableFile.relativeTo(genBase)}")
+
+            val recordCode = RecordGenerator.generate(table, "$pkg.record", mappings, enums, lateinit, valueClassIds, fkValueClassMap, immutable)
+            val recordFile = File(recordDir, "${pascalName}Record.kt")
             recordFile.writeText(recordCode)
             logger.lifecycle("Generated: ${recordFile.relativeTo(genBase)}")
+        }
 
-            val pojoCode = PojoGenerator.generate(table, "$pkg.pojo", mappings, enums)
-            val pojoFile = File(pojoDir, "${NameUtils.toPascalCase(table.name)}.kt")
-            pojoFile.writeText(pojoCode)
-            logger.lifecycle("Generated: ${pojoFile.relativeTo(genBase)}")
+        // JsonbConverter.kt — generated only when jsonbMappings are configured
+        if (mappings.isNotEmpty()) {
+            val converterCode = TableGenerator.generateJsonbConverter(pkg)
+            val converterFile = File(genPackageDir, "JsonbConverter.kt")
+            converterFile.writeText(converterCode)
+            logger.lifecycle("Generated: ${converterFile.relativeTo(genBase)}")
         }
 
         // Tables.kt — package root
@@ -157,8 +206,9 @@ abstract class SqlToJooqTask : DefaultTask() {
 
         // Generated concrete repository classes — repository/ package
         tables.forEach { table ->
-            val generatedCode = RepositoryGenerator.generateConcrete(table, pkg)
-            val generatedFile = File(repoDir, "Generated${NameUtils.toPascalCase(table.name)}Repository.kt")
+            val pascalName = NameUtils.toPascalCase(table.name)
+            val generatedCode = RepositoryGenerator.generateConcrete(table, pkg, valueClassIds)
+            val generatedFile = File(repoDir, "Generated${pascalName}Repository.kt")
             generatedFile.writeText(generatedCode)
             logger.lifecycle("Generated: ${generatedFile.relativeTo(genBase)}")
         }
@@ -168,9 +218,10 @@ abstract class SqlToJooqTask : DefaultTask() {
         stubRepoDir.mkdirs()
 
         tables.forEach { table ->
-            val stubFile = File(stubRepoDir, "${NameUtils.toPascalCase(table.name)}Repository.kt")
+            val pascalName = NameUtils.toPascalCase(table.name)
+            val stubFile = File(stubRepoDir, "${pascalName}Repository.kt")
             if (!stubFile.exists()) {
-                stubFile.writeText(RepositoryGenerator.generateHandWrittenStub(table, pkg))
+                stubFile.writeText(RepositoryGenerator.generateHandWrittenStub(table, pkg, valueClassIds))
                 logger.lifecycle("Generated (stub): ${stubFile.relativeTo(stubBase)}")
             }
         }
