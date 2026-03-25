@@ -58,11 +58,11 @@ plugins {
 
 ```kotlin
 sqlToJooq {
-    migrationTool.set(sqltojooq.MigrationTool.LIQUIBASE) // or FLYWAY
-    changelogFile.set(file("src/main/resources/db/changelog/db.changelog-master.yml"))
-    // migrationsDir.set(file("src/main/resources/db/migration")) // for Flyway
-    outputDir.set(file("src/main/kotlin"))
-    outputPackage.set("com.example.db.jooq")
+    migrationTool = sqltojooq.MigrationTool.LIQUIBASE // or FLYWAY
+    changelogFile = file("src/main/resources/db/changelog/db.changelog-master.yml")
+    // migrationsDir = file("src/main/resources/db/migration") // for Flyway
+    outputDir = file("src/main/kotlin")
+    outputPackage = "com.example.db.jooq"
 }
 ```
 
@@ -94,28 +94,26 @@ Generated sources are written to `build/generated/sources/jooq/main/kotlin` and 
 
 ```kotlin
 sqlToJooq {
-    migrationTool.set(sqltojooq.MigrationTool.LIQUIBASE)
-    changelogFile.set(file("src/main/resources/db/changelog/db.changelog-master.yml"))
-    outputDir.set(file("src/main/kotlin"))
-    outputPackage.set("com.example.db.jooq")
-    generateValueClassIds.set(true)
-    immutableRecordFields.set(true)
+    migrationTool = sqltojooq.MigrationTool.LIQUIBASE
+    changelogFile = file("src/main/resources/db/changelog/db.changelog-master.yml")
+    outputDir = file("src/main/kotlin")
+    outputPackage = "com.example.db.jooq"
+    generateValueClassIds = true
+    immutableRecordFields = true
 
-    excludeTables.set(setOf("flyway_schema_history", "databasechangelog"))
+    excludeTables = setOf("flyway_schema_history", "databasechangelog")
 
-    jsonbMappings.set(mapOf(
+    jsonbMappings = mapOf(
         "order.metadata" to "com.example.model.OrderMetadata",
         "user.preferences" to "com.example.model.UserPreferences"
-    ))
+    )
 
-    enumFields.set(mapOf(
+    enumFields = mapOf(
         "order.status" to "com.example.model.OrderStatus",
         "user.role" to "com.example.model.UserRole"
-    ))
+    )
 
-    lateinitFields.set(setOf(
-        "order.total_amount"
-    ))
+    lateinitFields = setOf("order.total_amount")
 }
 ```
 
