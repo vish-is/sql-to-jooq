@@ -33,8 +33,12 @@ object TableGenerator {
         if (hasValueClassConverter) {
             sb.appendLine("import org.jooq.Converter")
         }
+        sb.appendLine("import org.jooq.Name")
         sb.appendLine("import org.jooq.Record")
+        sb.appendLine("import org.jooq.Table")
+        sb.appendLine("import org.jooq.UniqueKey")
         sb.appendLine("import org.jooq.impl.DSL")
+        sb.appendLine("import org.jooq.impl.Internal")
         sb.appendLine("import org.jooq.impl.SQLDataType")
         sb.appendLine("import org.jooq.impl.TableImpl")
         if (hasEnums) {
@@ -73,11 +77,18 @@ object TableGenerator {
         jsonbImports.forEach { sb.appendLine("import $it") }
 
         sb.appendLine()
-        sb.appendLine("class $className : TableImpl<Record>(DSL.name(\"${table.name}\")) {")
+        sb.appendLine("class $className private constructor(alias: Name?, aliased: Table<Record>?) : TableImpl<Record>(alias ?: DSL.name(\"${table.name}\"), null, null, aliased) {")
+        sb.appendLine()
+        sb.appendLine("    constructor() : this(null, null)")
         sb.appendLine()
         sb.appendLine("    companion object {")
         sb.appendLine("        val $instanceName = $className()")
         sb.appendLine("    }")
+        sb.appendLine()
+        sb.appendLine("    override fun `as`(alias: String): $className = $className(DSL.name(alias), this)")
+        sb.appendLine("    override fun `as`(alias: Name): $className = $className(alias, this)")
+        sb.appendLine("    override fun rename(name: String): $className = $className(DSL.name(name), null)")
+        sb.appendLine("    override fun rename(name: Name): $className = $className(name, null)")
 
         table.columns.forEach { column ->
             sb.appendLine()
@@ -85,6 +96,16 @@ object TableGenerator {
             val jsonbType = resolveJsonbType(table.name, column, jsonbMappings)
             val fkValueClass = fkValueClassMap["${table.name}.${column.name}"]
             sb.append(generateField(column, enumType, jsonbType, valueClassName, fkValueClass))
+        }
+
+        val pkColumns = table.columns.filter { it.isPrimaryKey }
+        if (pkColumns.isNotEmpty()) {
+            val pkFieldRefs = pkColumns.joinToString(", ") { NameUtils.toUpperSnakeCase(it.name) }
+            sb.appendLine()
+            sb.appendLine("    private val _pk: UniqueKey<Record> = Internal.createUniqueKey(this, $pkFieldRefs)")
+            sb.appendLine()
+            sb.appendLine("    override fun getPrimaryKey(): UniqueKey<Record> = _pk")
+            sb.appendLine("    override fun getKeys(): List<UniqueKey<Record>> = listOf(_pk)")
         }
 
         sb.appendLine("}")
