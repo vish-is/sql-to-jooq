@@ -77,7 +77,7 @@ object TableGenerator {
         jsonbImports.forEach { sb.appendLine("import $it") }
 
         sb.appendLine()
-        sb.appendLine("class $className private constructor(alias: Name?, aliased: Table<Record>?) : TableImpl<Record>(alias ?: DSL.name(\"${table.name}\"), null, null, aliased) {")
+        sb.appendLine("class $className private constructor(alias: Name?, aliased: Table<Record>?) : TableImpl<Record>(alias ?: DSL.name(\"${table.name}\"), null, aliased, null) {")
         sb.appendLine()
         sb.appendLine("    constructor() : this(null, null)")
         sb.appendLine()
@@ -223,7 +223,7 @@ object TableGenerator {
                 "    val $fieldName = createField(DSL.name(\"${column.name}\"), $shortDataType$nullability, this, \"\", JsonbConverter(object : TypeReference<$shortType>() {}))\n"
             }
             else -> {
-                "    val $fieldName = createField(DSL.name(\"${column.name}\"), $shortDataType$nullability)\n"
+                "    val $fieldName = createField(DSL.name(\"${column.name}\"), $shortDataType$nullability, this)\n"
             }
         }
     }
