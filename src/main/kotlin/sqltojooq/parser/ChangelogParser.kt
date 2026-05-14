@@ -5,9 +5,10 @@ import java.io.File
 object ChangelogParser {
 
     /**
-     * Recursively resolves all `include`/`includeAll` directives starting from
-     * the master changelog file, returning SQL files in DFS order (matching
-     * Liquibase's own execution sequence).
+     * Recursively resolves all `include`/`includeAll` directives and
+     * `changeSet` → `sqlFile` references starting from the master changelog
+     * file, returning SQL files in document order (matching Liquibase's own
+     * execution sequence).
      */
     fun parseSqlFiles(changelogFile: File): List<File> {
         val visited = mutableSetOf<String>()
@@ -26,49 +27,73 @@ object ChangelogParser {
         }
     }
 
+    // - include:
+    //     file: some/path.yml
+    //     relativeToChangelogFile: true
+    private val includeRegex = Regex(
+        """-\s+include:\s*\n\s+file:\s*(\S.*?)\s*$(?:\s+relativeToChangelogFile:\s*(true|false))?""",
+        RegexOption.MULTILINE
+    )
+
+    // - includeAll:
+    //     path: some/directory/
+    private val includeAllRegex = Regex(
+        """-\s+includeAll:\s*\n\s+path:\s*(\S.*?)\s*$""",
+        RegexOption.MULTILINE
+    )
+
+    // - sqlFile:
+    //     path: changes/CMSYS-1234.sql
+    //     relativeToChangelogFile: true
+    private val sqlFileRegex = Regex(
+        """-\s+sqlFile:\s*\n\s+path:\s*(\S.*?)\s*$(?:\s+relativeToChangelogFile:\s*(true|false))?""",
+        RegexOption.MULTILINE
+    )
+
     /**
-     * Parses a single YAML changelog file and resolves all `include` and
-     * `includeAll` directives found in it. Supports:
+     * Parses a single YAML changelog file and resolves, in document order, all
+     * `include`, `includeAll` and `changeSet` → `sqlFile` references. Each
+     * directive is recorded with its position in the file so the resulting SQL
+     * file list preserves Liquibase's execution order even when directive types
+     * are interleaved.
      *
-     *   - include:
-     *       file: some/path.yml
-     *       relativeToChangelogFile: true
-     *
-     *   - includeAll:
-     *       path: some/directory/
+     * The trailing newline after a `file:`/`path:` value is optional, so a
+     * changelog without a final newline is still resolved correctly.
      */
     private fun resolveChangelog(changelogFile: File, visited: MutableSet<String>): List<File> {
         val content = changelogFile.readText()
         val changelogDir = changelogFile.parentFile
-        val result = mutableListOf<File>()
 
-        val includeRegex = Regex(
-            """-\s+include:\s*\n\s+file:\s*(.+?)\s*\n(?:\s+relativeToChangelogFile:\s*(true|false)\s*\n)?""",
-            RegexOption.MULTILINE
-        )
+        val directives = mutableListOf<Pair<Int, List<File>>>()
+
         includeRegex.findAll(content).forEach { match ->
             val path = match.groupValues[1].trim()
-            val isRelative = match.groupValues[2].let { it.isEmpty() || it == "true" }
+            // Liquibase default for relativeToChangelogFile is false (classpath-relative).
+            val isRelative = match.groupValues[2] == "true"
             val resolved = resolveIncludePath(path, changelogDir, isRelative, changelogFile)
-            result += resolveFile(resolved, visited)
+            directives += match.range.first to resolveFile(resolved, visited)
         }
 
-        val includeAllRegex = Regex(
-            """-\s+includeAll:\s*\n\s+path:\s*(.+?)\s*$""",
-            RegexOption.MULTILINE
-        )
         includeAllRegex.findAll(content).forEach { match ->
             val dirPath = match.groupValues[1].trim()
             val dir = resolveIncludePath(dirPath, changelogDir, isRelative = true, changelogFile)
-            if (dir.isDirectory) {
-                dir.listFiles()
-                    ?.filter { it.extension.lowercase() in setOf("yml", "yaml", "sql") }
-                    ?.sortedBy { it.name }
-                    ?.forEach { result += resolveFile(it, visited) }
-            }
+            val files = dir.takeIf { it.isDirectory }
+                ?.listFiles()
+                ?.filter { it.extension.lowercase() in setOf("yml", "yaml", "sql") }
+                ?.sortedBy { it.name }
+                ?.flatMap { resolveFile(it, visited) }
+                ?: emptyList()
+            directives += match.range.first to files
         }
 
-        return result
+        sqlFileRegex.findAll(content).forEach { match ->
+            val path = match.groupValues[1].trim()
+            val isRelative = match.groupValues[2] == "true"
+            val resolved = resolveIncludePath(path, changelogDir, isRelative, changelogFile)
+            directives += match.range.first to resolveFile(resolved, visited)
+        }
+
+        return directives.sortedBy { it.first }.flatMap { it.second }
     }
 
     private fun resolveIncludePath(
