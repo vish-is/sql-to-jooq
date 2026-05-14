@@ -17,11 +17,39 @@ class SqlParser {
 
         migrationFiles.forEach { file ->
             val sql = stripComments(file.readText()).lowercase()
-            parseCreateTables(sql, tables)
-            parseAlterTables(sql, tables)
+            processStatements(sql, tables)
         }
 
         return tables.values.toList()
+    }
+
+    // The statement terminator is `)` optionally followed by whitespace and `;`,
+    // or `)` at end of input — so a CREATE TABLE whose `;` sits on its own line
+    // (or is missing entirely) is still matched without swallowing later statements.
+    private val createTableRegex = Regex(
+        """create\s+table\s+(?:if\s+not\s+exists\s+)?(?:\w+\.)?(\w+)\s*\((.*?)\)\s*(?:;|$)""",
+        setOf(RegexOption.DOT_MATCHES_ALL)
+    )
+    private val alterTableRegex = Regex(
+        """alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:\w+\.)?(\w+)\s+(.*?);""",
+        setOf(RegexOption.DOT_MATCHES_ALL)
+    )
+    private val dropTableRegex = Regex(
+        """drop\s+table\s+(?:if\s+exists\s+)?(?:\w+\.)?(\w+)"""
+    )
+
+    /**
+     * Applies every CREATE/ALTER/DROP TABLE statement found in [sql] in document
+     * order. Processing in order matters: a `DROP TABLE x; CREATE TABLE x ...`
+     * recreate within one file must end with the table present.
+     */
+    private fun processStatements(sql: String, tables: MutableMap<String, TableDefinition>) {
+        val statements = buildList<Pair<Int, () -> Unit>> {
+            createTableRegex.findAll(sql).forEach { m -> add(m.range.first to { applyCreateTable(m, tables) }) }
+            alterTableRegex.findAll(sql).forEach { m -> add(m.range.first to { applyAlterTable(m, tables) }) }
+            dropTableRegex.findAll(sql).forEach { m -> add(m.range.first to { applyDropTable(m, tables) }) }
+        }
+        statements.sortedBy { it.first }.forEach { it.second() }
     }
 
     private fun stripComments(sql: String): String =
@@ -42,51 +70,51 @@ class SqlParser {
                 if (commentStart >= 0) line.substring(0, commentStart) else line
             }
 
-    private fun parseCreateTables(sql: String, tables: MutableMap<String, TableDefinition>) {
-        val createTableRegex = Regex(
-            """create\s+table\s+(?:if\s+not\s+exists\s+)?(?:\w+\.)?(\w+)\s*\((.*?)\);""",
-            setOf(RegexOption.DOT_MATCHES_ALL)
-        )
+    private fun applyCreateTable(match: MatchResult, tables: MutableMap<String, TableDefinition>) {
+        val tableName = match.groupValues[1]
+        val body = match.groupValues[2]
+        val table = TableDefinition(tableName)
 
-        createTableRegex.findAll(sql).forEach { match ->
-            val tableName = match.groupValues[1]
-            val body = match.groupValues[2]
-            val table = TableDefinition(tableName)
+        val primaryKeys = extractPrimaryKeys(body)
+        val foreignKeys = extractForeignKeys(body)
 
-            val primaryKeys = extractPrimaryKeys(body)
-            val foreignKeys = extractForeignKeys(body)
-
-            parseColumnLines(body).forEach { line ->
-                parseColumn(line, primaryKeys)?.let { col ->
-                    // Merge table-level FK info if inline REFERENCES was not present
-                    val merged = if (col.referencedTable == null && foreignKeys.containsKey(col.name)) {
-                        col.copy(referencedTable = foreignKeys[col.name])
-                    } else col
-                    table.columns.add(merged)
-                }
+        parseColumnLines(body).forEach { line ->
+            parseColumn(line, primaryKeys)?.let { col ->
+                // Merge table-level FK info if inline REFERENCES was not present
+                val merged = if (col.referencedTable == null && foreignKeys.containsKey(col.name)) {
+                    col.copy(referencedTable = foreignKeys[col.name])
+                } else col
+                table.columns.add(merged)
             }
+        }
 
-            tables[tableName] = table
+        tables[tableName] = table
+    }
+
+    private fun applyAlterTable(match: MatchResult, tables: MutableMap<String, TableDefinition>) {
+        val tableName = match.groupValues[1]
+        val body = match.groupValues[2].trim()
+        val table = tables[tableName] ?: return
+
+        // ALTER TABLE x RENAME TO y — re-key the table under its new name.
+        val tableRename = tableRenameRegex.find(body.replace(Regex("""\s+"""), " "))
+        if (tableRename != null) {
+            val newName = tableRename.groupValues[1]
+            tables.remove(tableName)
+            tables[newName] = TableDefinition(newName, table.columns)
+            return
+        }
+
+        splitByTopLevelComma(body).forEach { clause ->
+            processAlterClause(clause.trim(), table)
         }
     }
 
-    private fun parseAlterTables(sql: String, tables: MutableMap<String, TableDefinition>) {
-        val alterTableRegex = Regex(
-            """alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:\w+\.)?(\w+)\s+(.*?);""",
-            setOf(RegexOption.DOT_MATCHES_ALL)
-        )
-
-        alterTableRegex.findAll(sql).forEach { match ->
-            val tableName = match.groupValues[1]
-            val body = match.groupValues[2].trim()
-            val table = tables[tableName] ?: return@forEach
-
-            val clauses = splitByTopLevelComma(body)
-            clauses.forEach { clause ->
-                processAlterClause(clause.trim(), table)
-            }
-        }
+    private fun applyDropTable(match: MatchResult, tables: MutableMap<String, TableDefinition>) {
+        tables.remove(match.groupValues[1])
     }
+
+    private val tableRenameRegex = Regex("""^rename\s+to\s+(\w+)""")
 
     private val addColumnRegex = Regex(
         """add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?(\w+)\s+(.+)""",
@@ -112,8 +140,35 @@ class SqlParser {
         "constraint", "index", "unique", "primary", "foreign", "check"
     )
 
-    private fun processAlterClause(clause: String, table: TableDefinition) {
+    private fun processAlterClause(rawClause: String, table: TableDefinition) {
+        // Collapse internal whitespace so that clauses formatted across multiple
+        // lines (e.g. `add\n COLUMN ...`) are recognised by the prefix checks below.
+        val clause = rawClause.trim().replace(Regex("""\s+"""), " ")
         when {
+            // ALTER TABLE ... ADD [CONSTRAINT name] PRIMARY KEY (col, ...)
+            clause.startsWith("add ") && clause.contains("primary key") -> {
+                Regex("""primary\s+key\s*\(([^)]+)\)""").find(clause)?.let { m ->
+                    val pkCols = m.groupValues[1].split(",").map { it.trim() }.toSet()
+                    table.columns.replaceAll { col ->
+                        col.copy(
+                            isPrimaryKey = col.name in pkCols,
+                            nullable = if (col.name in pkCols) false else col.nullable
+                        )
+                    }
+                }
+            }
+            // ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY (col) REFERENCES table
+            clause.startsWith("add constraint") || clause.startsWith("add foreign") -> {
+                val fkMatch = Regex("""foreign\s+key\s*\((\w+)\)\s*references\s+(?:\w+\.)?(\w+)""").find(clause)
+                if (fkMatch != null) {
+                    val colName = fkMatch.groupValues[1]
+                    val refTable = fkMatch.groupValues[2]
+                    val idx = table.columns.indexOfFirst { it.name == colName }
+                    if (idx >= 0 && table.columns[idx].referencedTable == null) {
+                        table.columns[idx] = table.columns[idx].copy(referencedTable = refTable)
+                    }
+                }
+            }
             clause.startsWith("add ") -> {
                 addColumnRegex.find(clause)?.let { m ->
                     val columnName = m.groupValues[1]
@@ -170,18 +225,6 @@ class SqlParser {
                     }
                 }
             }
-            // ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY (col) REFERENCES table
-            clause.startsWith("add constraint") || clause.startsWith("add foreign") -> {
-                val fkMatch = Regex("""foreign\s+key\s*\((\w+)\)\s*references\s+(?:\w+\.)?(\w+)""").find(clause)
-                if (fkMatch != null) {
-                    val colName = fkMatch.groupValues[1]
-                    val refTable = fkMatch.groupValues[2]
-                    val idx = table.columns.indexOfFirst { it.name == colName }
-                    if (idx >= 0 && table.columns[idx].referencedTable == null) {
-                        table.columns[idx] = table.columns[idx].copy(referencedTable = refTable)
-                    }
-                }
-            }
             // drop constraint, etc. — ignored
         }
     }
@@ -189,16 +232,19 @@ class SqlParser {
     private fun extractPrimaryKeys(body: String): Set<String> {
         val keys = mutableSetOf<String>()
 
-        // constraint-level "primary key (col1, col2)"
-        val constraintPkRegex = Regex("""(?:^|,)\s*primary\s+key\s*\(([^)]+)\)""")
-        constraintPkRegex.find(body)?.let { match ->
+        // table-level key: "primary key (col1, col2)" or "constraint <name> primary key (...)"
+        val constraintPkRegex = Regex("""(?:^|,)\s*(?:constraint\s+\w+\s+)?primary\s+key\s*\(([^)]+)\)""")
+        constraintPkRegex.findAll(body).forEach { match ->
             match.groupValues[1].split(",").forEach { keys.add(it.trim()) }
         }
 
         // inline "column_name type primary key" — per column line
         body.lines().forEach { line ->
             val trimmed = line.trim().trimEnd(',')
-            if (trimmed.contains(Regex("""\bprimary\s+key\b""")) && !trimmed.startsWith("primary")) {
+            if (trimmed.contains(Regex("""\bprimary\s+key\b""")) &&
+                !trimmed.startsWith("primary") &&
+                !trimmed.startsWith("constraint")
+            ) {
                 val colName = trimmed.split("\\s+".toRegex()).firstOrNull()
                 if (colName != null) keys.add(colName)
             }
@@ -238,6 +284,16 @@ class SqlParser {
         return result
     }
 
+    /** PostgreSQL pseudo-types that auto-create an implicit NOT NULL column. */
+    private val serialTypes = setOf("serial", "bigserial", "smallserial", "serial2", "serial4", "serial8")
+
+    /**
+     * Detects a real column-level `NOT NULL` constraint, ignoring `not null`
+     * occurring inside a `CHECK (... IS NOT NULL)` expression.
+     */
+    private fun hasNotNullConstraint(definition: String): Boolean =
+        definition.replace("is not null", "").contains("not null")
+
     private fun parseColumn(line: String, primaryKeys: Set<String>): ColumnDefinition? {
         val tokens = line.trim().split("\\s+".toRegex(), limit = 3)
         if (tokens.size < 2) return null
@@ -245,10 +301,10 @@ class SqlParser {
         val name = tokens[0]
         if (name == "primary" || name == "constraint" || name == "unique" || name == "foreign") return null
 
-        val rest = tokens.drop(1).joinToString(" ")
-        val isPk = primaryKeys.contains(name) || rest.contains("primary key")
-        val isNotNull = rest.contains("not null") || isPk
+        val rest = tokens.drop(1).joinToString(" ").replace(Regex("""\s+"""), " ")
         val sqlType = extractSqlType(rest)
+        val isPk = primaryKeys.contains(name) || rest.contains("primary key")
+        val isNotNull = hasNotNullConstraint(rest) || isPk || sqlType in serialTypes
         val referencedTable = extractReferencedTable(rest)
 
         return ColumnDefinition(
@@ -261,8 +317,8 @@ class SqlParser {
     }
 
     private fun parseColumnType(columnName: String, definition: String): ColumnDefinition {
-        val isNotNull = definition.contains("not null")
         val sqlType = extractSqlType(definition)
+        val isNotNull = hasNotNullConstraint(definition) || sqlType in serialTypes
         val referencedTable = extractReferencedTable(definition)
         return ColumnDefinition(
             name = columnName,
